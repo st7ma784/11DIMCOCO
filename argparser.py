@@ -14,6 +14,11 @@ class parser(HyperOptArgumentParser):
         self.opt_list("--UsePreTrainedIm", default=False, type=bool, options=[True,False], tunable=False)
         self.opt_list("--UsePreTrainedEn", default=False, type=bool, options=[True,False], tunable=False)
         self.opt_list("--UseSeparateEncoder", default=True, type=bool, options=[True,False], tunable=False)
+        self.opt_list("--precision", default=16, options=[16,32], tunable=False)
+        self.opt_list("--transformer_layers", default=5, type=int, options=[3,4,5,6], tunable=True)
+        self.opt_list("--transformer_heads", default=32, type=int, options=[16,32], tunable=True)
+        self.opt_list("--embed_dim", default=256, type=int, options=[128,256,512], tunable=True)
+        self.opt_list("--transformer_width", default=256, type=int, options=[128,256,512], tunable=True)
       
 if __name__== "__main__":
     myparser=parser()

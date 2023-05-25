@@ -4,7 +4,7 @@ import wandb
 wandb.login()
 import pandas as pd
 import torch,time
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer,CLIPTokenizer
 from pySmartDL import SmartDL
 
 from torchvision.transforms import ToTensor, Compose, Resize
@@ -24,7 +24,7 @@ class TriModal(torch.utils.data.Dataset):
         self.dir=dir
         self.tokenizer=tokenizer
         if self.tokenizer== None:
-            self.tokenizer= AutoTokenizer.from_pretrained("gpt2",cache_dir=dir)
+            self.tokenizer=CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32",cache_dir=self.dir)
             self.tokenizer.vocab["</s>"] = self.tokenizer.vocab_size -1
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.func= lambda x: self.tokenizer(
@@ -32,7 +32,6 @@ class TriModal(torch.utils.data.Dataset):
                     add_special_tokens = True, # Add '[CLS]' and '[SEP]'
                     max_length = 77,           # Pad & truncate all sentences.
                     padding = "max_length",
-                    truncation=True,
                     return_attention_mask = False,   # Construct attn. masks.
                     return_tensors = 'pt',     # Return pytorch tensors.
                 )['input_ids']
@@ -54,6 +53,7 @@ class TriModal(torch.utils.data.Dataset):
         imid=self.filenames[idx]
         imid="".join([(12-len(str(imid)))*"0"]+[str(imid)]+[".jpg"])
         img=Image.open(os.path.join(self.imdir,imid)).convert("RGB")
+
         if self.transform:
             img=self.transform(img)
         else:
@@ -63,35 +63,68 @@ class TriModal(torch.utils.data.Dataset):
         return self.enSentences[idx],self.spanSentences[idx], img
 
 class DataSet(torch.utils.data.Dataset):
-    def __init__(self,dir,filenames,captions=[],transform=None):
+    def __init__(self,dir,filenames,captions=[],transform=None,sort=True):
         self.dir=dir
         self.entries= list(zip(filenames,*[c for c in captions]))
         self.transform=transform
+        #each entries is a tuple of (filename,caption1,caption2)
+        #however, 5 entries exist for each image
+        #so we need to group them by filename
+        if sort==True:
+            self.filenames=filenames
+            self.filenames=list(set(filenames))
+            self.filenames.sort()
+            #create a dictionary of filenames to captions
+            self.captions={f:[] for f in self.filenames}
+            for e in self.entries:
+                self.captions[e[0]].append(e[1:])
     def __len__(self):
         return len(self.filenames)
     def __getitem__(self,idx):
-        imid,captions=self.entries[idx][0],self.entries[idx][0:]
-
+        imid=self.filenames[idx]
+        captionse=[caption[0] for caption in self.captions[imid]][:5]
+        captionsp=[caption[1] for caption in self.captions[imid]][:5]
+        caption=torch.stack(captionse+captionsp)
+        if caption.shape[0]!=10:
+            return None
         imid="".join([(12-len(str(imid)))*"0"]+[str(imid)]+[".jpg"])
         img=Image.open(os.path.join(self.dir,imid))
-        if self.transform:
-            return self.transform(Rs(img))
-        return T(img),captions
+        img=img.convert("RGB")
+        img=preprocess(img)
+        if not img.shape==(3,224,224):
+            print("idx {} imid {} img {}".format(idx,imid,img.shape))
+            return None
+        #print("IDX {}: {}".format(idx,imid))#
+        #print("Image: {}".format( preprocess(img).shape))
+        #print("Captions: {}".format(caption.shape))
+        return img,caption
+def collate_fn(batch):
+    length=len(batch)
+    #print("shapes: {}".format([item.shape for b in batch for item in b]))
+    batch = list(filter(lambda x: x is not None, batch))
+    delta=length-len(batch)
+    # print("delta: {}".format(delta))
+    i=0
+    while delta>0:
+        #add the first element to the end of the batch
+        batch+=[batch[i]]
+        i+=1
+        delta-=1
+    return torch.utils.data.dataloader.default_collate(batch)
 class DataModule(pl.LightningDataModule):
 
     def __init__(self,dir="MS-COCO-ES",batch_size=3,tokenizer=None):
-        super().__init__(batch_size)
+        super().__init__()
+        self.dir=dir
         self.tokenizer=tokenizer
         if self.tokenizer== None:
-            self.tokenizer= AutoTokenizer.from_pretrained("gpt2",cache_dir=dir)
-            self.tokenizer.vocab["</s>"] = self.tokenizer.vocab_size -1
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer= CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32",cache_dir=self.dir)
+            
         self.func= lambda x: self.tokenizer(
                     x,                      # Sentence to encode.
                     add_special_tokens = True, # Add '[CLS]' and '[SEP]'
                     max_length = 77,           # Pad & truncate all sentences.
                     padding = "max_length",
-                    truncation=True,
                     return_attention_mask = False,   # Construct attn. masks.
                     return_tensors = 'pt',     # Return pytorch tensors.
                 )['input_ids']
@@ -101,7 +134,7 @@ class DataModule(pl.LightningDataModule):
         #self.device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.imdir=os.path.join(dir,"images")
         #self.clip,self.preprocess = clip.load("ViT-B/32", jit=False, device=self.device)
-
+        self.vocab_size=self.tokenizer.vocab_size
     @torch.no_grad()
     def download_data(self):
         # wget https://github.com/carlosGarciaHe/MS-COCO-ES/raw/master/data/train_human_spanish.xlsx
@@ -109,7 +142,7 @@ class DataModule(pl.LightningDataModule):
         # wget https://github.com/carlosGarciaHe/MS-COCO-ES/raw/master/data/train_human_spanish.xlsx
         urls= ["https://github.com/carlosGarciaHe/MS-COCO-ES/raw/master/data/train_human_spanish.xlsx",
         "https://github.com/carlosGarciaHe/MS-COCO-ES/raw/master/data/train_machine_english.xlsx",
-        "https://github.com/carlosGarciaHe/MS-COCO-ES/raw/master/data/train_human_spanish.xlsx",
+        "https://github.com/carlosGarciaHe/MS-COCO-ES/raw/master/data/train_machine_spanish.xlsx",
         ]
         objs=[]
         for url in urls:
@@ -124,49 +157,77 @@ class DataModule(pl.LightningDataModule):
         for obj in objs:
             while not obj.isFinished():
                 time.sleep(5)
-        filea="train_machine_spanish.xlsx"
+        filea="train_human_spanish.xlsx"
         fileb="train_machine_english.xlsx"
         dataframeA=pd.read_excel(os.path.join(self.datadir,filea),engine="openpyxl")
         dataframeB=pd.read_excel(os.path.join(self.datadir,fileb),engine="openpyxl")
         
         sentencesa= torch.stack(dataframeA['caption'].apply(self.func).values.tolist(),dim=0)
-        sentencesa=sentencesa.reshape((int(sentencesa.shape[0]/5),5))
+        #sentencesa=sentencesa.reshape((int(sentencesa.shape[0]/5),5))
 
         sentencesb= torch.stack(dataframeB['caption'].apply(self.func).values.tolist(),dim=0)
-        sentencesb=sentencesb.reshape((int(sentencesb.shape[0]/5),5))
+        #sentencesb=sentencesb.reshape((int(sentencesb.shape[0]/5),5))
         imagesids=dataframeA["image_id"]
-        dataset=DataSet(dir=self.imdir,filenames=imagesids,captions=(sentencesa,sentencesb),transform=self.preprocess)
+        dataset=DataSet(dir=os.path.join(self.imdir,"train2017"),filenames=imagesids,captions=(sentencesa,sentencesb))
         
 
         path="pretrain.pt"
         torch.save(dataset, path)
         #print("datasets {} : ".format(data[0]))
-        train_size = int(0.8 * len(data))
-        val_size = int(0.1 *  len(data))
-        test_size= len(data) - (train_size+val_size)
+        train_size = int(0.8 * len(dataset))
+        val_size = int(0.1 *  len(dataset))
+        test_size= len(dataset) - (train_size+val_size)
 
         self.train_dataset, self.val_dataset, self.test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size,test_size])
         torch.save(self.train_dataset, "train.pt")
         torch.save(self.val_dataset, "validation.pt")
         torch.save(self.test_dataset, "test.pt")
-      
+
+        #Check images from COCO are in images folder
+        # wget http://images.cocodataset.org/zips/train2017.zip
+        # wget http://images.cocodataset.org/zips/val2017.zip
+        # wget http://images.cocodataset.org/zips/test2017.zip
+        # wget http://images.cocodataset.org/zips/unlabeled2017.zip
+        # wget http://images.cocodataset.org/zips/val2014.zip
+        # wget http://images.cocodataset.org/zips/train2014.zip
+        # wget http://images.cocodataset.org/zips/test2014.zip
+        # wget http://images.cocodataset.org/zips/unlabeled2014.zip
+        
+        urls= ["http://images.cocodataset.org/zips/train2017.zip"
+        ]
+        objs=[]
+        for url in urls:
+            name=str(url).split('/')[-1]
+            obj=SmartDL(url,os.path.join(self.imdir,name),progress_bar=False, verify=False)
+            obj.FileName=name
+            if not os.path.exists(os.path.join(self.imdir,name)):
+                print(os.path.join(self.imdir,name))
+                objs.append(obj)
+                obj.start(blocking=False)
+        import zipfile
+        for obj in objs:
+            while not obj.isFinished():
+                time.sleep(5)
+            #unzip files
+            filename=str(obj.get_dest())
+            #checkif file is already unzip
+            if not os.path.exists(os.path.join(self.imdir,filename.split('.')[0])):
+
+                with zipfile.ZipFile(filename, 'r') as zip_ref:
+                    zip_ref.extractall(self.imdir)
+            
+        
     def train_dataloader(self):
         if not hasattr(self, 'train_dataset'):
             #check if "espretrain.pt") exists in the directory
-            if os.path.exists("train.pt"):
-                self.train_dataset=torch.load("train.pt")
-            else:
-                self.download_data()
+            self.download_data()
             
-        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, prefetch_factor=4, pin_memory=True)
+        return torch.utils.data.DataLoader(self.train_dataset,collate_fn=collate_fn, batch_size=self.batch_size, shuffle=True, num_workers=4, prefetch_factor=4, pin_memory=True, drop_last=True)
     def val_dataloader(self):
         if not hasattr(self, 'val_dataset'):
             #check if esprevalidation.pt exists in the directory
-            if os.path.exists("validation.pt"):
-                self.val_dataset=torch.load("validation.pt")
-            else:
-                self.download_data()
-        return torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, prefetch_factor=4, pin_memory=True)
+            self.download_data()
+        return torch.utils.data.DataLoader(self.val_dataset, collate_fn=collate_fn,batch_size=self.batch_size, shuffle=True, num_workers=4, prefetch_factor=4, pin_memory=True, drop_last=True)
     def test_dataloader(self):
         if not hasattr(self, 'test_dataset'):
             #check for espretest.pt in the directory
@@ -176,7 +237,22 @@ class DataModule(pl.LightningDataModule):
 
                 self.download_data()
 
-        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, prefetch_factor=4, pin_memory=True)
+        return torch.utils.data.DataLoader(self.test_dataset, collate_fn=collate_fn, batch_size=self.batch_size, shuffle=True, num_workers=4, prefetch_factor=4,drop_last=True, pin_memory=True)
 if __name__=="__main__":
-    data=DataModule(batch_size=3)
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument('--dir', type=str, default="E:", help='path to the data')
+    parser.add_argument('--batch_size', type=int, default=3, help='batch size')
+    args = parser.parse_args()
+    dir=args.dir
+    batch_size=args.batch_size
+    data=DataModule(batch_size=batch_size,dir=dir)
     data.download_data()
+    for idx,item in enumerate(data.train_dataloader()):
+        
+        print(idx)
+        for i in item:
+            if isinstance(i,torch.Tensor):
+                print(i.shape)
+            else:
+                print(i)
