@@ -205,10 +205,10 @@ class LightningCLIPModule(LightningModule):
         esLogits=esLogits/esLogits.norm(dim=-1,keepdim=True)
         ImLogits=ImLogits/ImLogits.norm(dim=-1,keepdim=True)
 
-        TrEnLogits=TrEnLogits* 400 /TrEnLogits.shape[1]
-        enLogits=enLogits*400 /enLogits.shape[1]
-        esLogits=esLogits *400 /esLogits.shape[1]
-        ImLogits=ImLogits *400 /ImLogits.shape[1]
+        TrEnLogits=TrEnLogits /TrEnLogits.shape[1]
+        enLogits=enLogits /enLogits.shape[1]
+        esLogits=esLogits  /esLogits.shape[1]
+        ImLogits=ImLogits  /ImLogits.shape[1]
 
         logits=torch.cat((TrEnLogits,esLogits,enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,16,H to 16,B,H
 
@@ -249,9 +249,9 @@ class LightningCLIPModule(LightningModule):
         ImLogits=self.encode_image(im).unsqueeze(1)#@ self.text_projection
 
         logits=torch.cat((enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,21,H to 21,B,H
-        LossLogits=reduce(torch.add,[reduce(torch.add,[item@ x.T for x in logits]) for item in logits])*self.logit_scale.exp()
-        loss = self.loss(LossLogits, labels)
-        loss = loss.mean()
+        
+
+        loss= reduce(torch.add,[self.loss(y@x.T *self.logit_scale.exp(),labels) for x in logits for y in logits])
 
         self.log('val_loss_contr', loss, prog_bar=True,enable_graph=False, rank_zero_only=True)
         self.log('val_loss_model', modelLoss, prog_bar=True,enable_graph=False, rank_zero_only=True)
@@ -259,7 +259,7 @@ class LightningCLIPModule(LightningModule):
         self.log('val_loss', loss, prog_bar=True,enable_graph=False, rank_zero_only=True)
         return {"loss": loss}
     
-    
+
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
         model=self.model
