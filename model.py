@@ -192,7 +192,9 @@ class LightningCLIPModule(LightningModule):
         #im is shape [batchsize,3,224,224]
         #captions is shape [batchsize,10,1,77] and is made of en and es captions (5 each)
         TranlatedEnTokenlogits,TrencoderLogits=self.translate(es=Es.flatten(0,1), en=En.flatten(0,1))
-        TranlatedEnTokenlogits=torch.nn.functional.gumbel_softmax(TranlatedEnTokenlogits.reshape(Es.shape[0],Es.shape[1],77,-1),dim=-1)
+        #TranlatedEnTokenlogits=torch.nn.functional.gumbel_softmax(TranlatedEnTokenlogits.reshape(Es.shape[0],Es.shape[1],77,-1),dim=-1)
+        TranlatedEnTokenlogits=TranlatedEnTokenlogits.reshape(Es.shape[0],Es.shape[1],77,-1) # not forcing tokens seems to help??!?
+
         esLogits=TrencoderLogits.reshape(Es.shape[0],Es.shape[1],self.transformer_width)
         
         enLogits=self.encode_text_en(En.flatten(0,1)).reshape(En.shape[0],En.shape[1],self.transformer_width)
@@ -211,7 +213,7 @@ class LightningCLIPModule(LightningModule):
         ImLogits=ImLogits  /ImLogits.shape[1]
 
         logits=torch.cat((TrEnLogits,esLogits,enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,16,H to 16,B,H
-
+        logits=logits*logits.shape[0]
         # LossLogits=reduce(torch.add,[reduce(torch.add,[item@x.T  for x in logits]) for item in logits]) *self.logit_scale.exp() *256
         # #LossLogits=LossLogits- torch.diag(LossLogits).diag() #remove the diagonal
         # #LossLogits=LossLogits- (reduce(torch.add,[item@item.T for item in logits]) *self.logit_scale.exp() *256)
