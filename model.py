@@ -12,6 +12,24 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from functools import reduce
 class LightningCLIPModule(LightningModule):
+
+    def getMetric(self, metricName: str, attempts: int=3) -> evaluate.EvaluationModule:
+        """ Gets a metric from HuggingFace's Evaluate API.
+            Tries three times because their network can get flaky when busy.
+        Args:
+            metricName (str): the name of the metric to use.
+        Returns:
+            EvaluationModule: the metric.
+        """
+        import evaluate, time
+        for attempt in range(attempts):
+
+            try:
+                return evaluate.load(metricName)
+            except Exception:
+                time.sleep(60)
+            
+
     def __init__(self,
                 
                 learning_rate,
@@ -61,6 +79,8 @@ class LightningCLIPModule(LightningModule):
                            eos_token_id = 49407)
 
         self.model = MBartForConditionalGeneration(config=config)
+        self.model2 = MBartForConditionalGeneration(config=config)
+        self.model2.train()
         self.model.train()
         self.context_length = context_length
         self.encoder = Transformer(
@@ -166,7 +186,7 @@ class LightningCLIPModule(LightningModule):
         x = self.ln_final(x).type(self.dtype)
         x = x[torch.arange(x.shape[0]), torch.max(text.argmax(dim=-1),dim=-1).indices] 
         return x
-    def translate(self,es,en):
+    def translateToEN(self,es,en):
         #take ES and convert to EN and return logits and encoder output
         #es is shape [batchsize,5,77]
         # print(es.shape)
@@ -178,9 +198,16 @@ class LightningCLIPModule(LightningModule):
         # print("EOT out are: ",es[torch.arange(encoderoutput.shape[0]),es.argmax(dim=-1)])
         encoderoutput=encoderoutput[torch.arange(encoderoutput.shape[0]),es.argmax(dim=-1)]        
         #print(encoderoutput.shape)# [batchsize*5,77,512]
-
         return logits, encoderoutput
-        
+    def translateToES(self,en,es):
+
+        outputs=self.model2(input_ids=en, return_dict=True)
+        logits=outputs.logits
+        encoderoutput=outputs.encoder_last_hidden_state
+        #select the encoder output for the last token of each caption (the token that is the end token) 
+        encoderoutput=encoderoutput[torch.arange(encoderoutput.shape[0]),en.argmax(dim=-1)]        
+        return logits, encoderoutput
+
     def training_step(self, batch, batch_idx,optimizer_idx=0):
         n=16
         labels=torch.arange(batch[0].shape[0],device=self.device)
@@ -191,14 +218,14 @@ class LightningCLIPModule(LightningModule):
         En=captions[:,:split]
         #im is shape [batchsize,3,224,224]
         #captions is shape [batchsize,10,1,77] and is made of en and es captions (5 each)
-        TranlatedEnTokenlogits,TrencoderLogits=self.translate(es=Es.flatten(0,1), en=En.flatten(0,1))
-        #TranlatedEnTokenlogits=torch.nn.functional.gumbel_softmax(TranlatedEnTokenlogits.reshape(Es.shape[0],Es.shape[1],77,-1),dim=-1)
+        TranlatedEnTokenlogits,TrencoderLogits=self.translateToEN(es=Es.flatten(0,1), en=En.flatten(0,1))
         TranlatedEnTokenlogits=TranlatedEnTokenlogits.reshape(Es.shape[0],Es.shape[1],77,-1) # not forcing tokens seems to help??!?
-
         esLogits=TrencoderLogits.reshape(Es.shape[0],Es.shape[1],self.transformer_width)
-        
-        enLogits=self.encode_text_en(En.flatten(0,1)).reshape(En.shape[0],En.shape[1],self.transformer_width)
         TrEnLogits=self.encode_text_pseudo_en(TranlatedEnTokenlogits.flatten(0,1)).reshape(TranlatedEnTokenlogits.shape[0],TranlatedEnTokenlogits.shape[1],self.transformer_width)
+        
+
+
+        enLogits=self.encode_text_en(En.flatten(0,1)).reshape(En.shape[0],En.shape[1],self.transformer_width)
         ImLogits=self.encode_image(im).unsqueeze(1) @ self.text_projection
         #esLogits=self.encode_text_es(Es.flatten(0,1)).reshape(Es.shape[0],Es.shape[1],self.transformer_width)
        
@@ -229,6 +256,8 @@ class LightningCLIPModule(LightningModule):
         self.log('train_loss', loss, prog_bar=True,enable_graph=False, rank_zero_only=True)
         
         return {"loss": loss}
+              
+
 
     def validation_step(self, batch, batch_idx):
         
@@ -244,14 +273,15 @@ class LightningCLIPModule(LightningModule):
         outputs=self.model(input_ids=Es.flatten(0,1),labels=En.flatten(0,1), return_dict=True)
         logits=outputs.logits
         modelLoss=outputs.loss
-
-        ENTokens=torch.cat((torch.argmax(logits.reshape(Es.shape[0],Es.shape[1],77,-1),dim=-1),En),dim=1)
+        trtokens=torch.argmax(logits.reshape(Es.shape[0],Es.shape[1],77,-1),dim=-1)
+        ENTokens=torch.cat((trtokens,En),dim=1)
         # print(ENTokens.shape)#shape [batchsize,10,77]
         enLogits=self.encode_text_en(ENTokens.flatten(0,1)).reshape(ENTokens.shape[0],ENTokens.shape[1],self.transformer_width)
         ImLogits=self.encode_image(im).unsqueeze(1)#@ self.text_projection
 
-        logits=torch.cat((enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,21,H to 21,B,H
+        logits=torch.cat((logits,enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,16,H to 16,B,H
         
+
 
         loss= reduce(torch.add,[self.loss(y@x.T *self.logit_scale.exp(),labels) for x in logits for y in logits])
 
@@ -259,9 +289,17 @@ class LightningCLIPModule(LightningModule):
         self.log('val_loss_model', modelLoss, prog_bar=True,enable_graph=False, rank_zero_only=True)
         loss=loss+modelLoss
         self.log('val_loss', loss, prog_bar=True,enable_graph=False, rank_zero_only=True)
-        return {"loss": loss}
+        return {"loss": loss, "entokens":ENTokens.detach(), "translatedTokens":trtokens.detach()}
     
+    def validation_epoch_end(self, outputs):
+        entokens=torch.cat([x["entokens"] for x in outputs],dim=0)
+        translatedTokens=torch.cat([x["translatedTokens"] for x in outputs],dim=0)
+        decoded=self.tokenizer.batch_decode(entokens,skip_special_tokens=True)
+        translated=self.tokenizer.batch_decode(translatedTokens,skip_special_tokens=True)
+        metric = self.getMetric("bertscore")
+        self.log("F1 BERT TranslationScore", metric.compute(predictions=decoded, references=translated)["f1"].mean().item())
 
+    
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
         model=self.model
