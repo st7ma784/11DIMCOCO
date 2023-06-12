@@ -11,9 +11,8 @@ import clip
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from functools import reduce
-
-import evaluate, time
-
+import evaluate
+import time
 class LightningCLIPModule(LightningModule):
 
     def getMetric(self, metricName: str, attempts: int=3) -> evaluate.EvaluationModule:
@@ -33,7 +32,7 @@ class LightningCLIPModule(LightningModule):
             
 
     def __init__(self,
-                
+                tokenizer,
                 learning_rate,
                 adam_epsilon: float = 1e-8,
                 warmup_steps: int = 0,
@@ -53,6 +52,7 @@ class LightningCLIPModule(LightningModule):
 
         super().__init__()
         self.save_hyperparameters()
+        self.tokenizer=tokenizer
         print("learning_rate",learning_rate)
         from transformers import EncoderDecoderModel
         from transformers import MBartConfig, MBartForConditionalGeneration, EncoderDecoderModel
@@ -280,8 +280,19 @@ class LightningCLIPModule(LightningModule):
         # print(ENTokens.shape)#shape [batchsize,10,77]
         enLogits=self.encode_text_en(ENTokens.flatten(0,1)).reshape(ENTokens.shape[0],ENTokens.shape[1],self.transformer_width)
         ImLogits=self.encode_image(im).unsqueeze(1)#@ self.text_projection
+        # print(ImLogits.shape)
+        # #esLogits=self.encode_text_es(Es.flatten(0,1)).reshape(Es.shape[0],Es.shape[1],self.transformer_width)
+        # print(enLogits.shape)
+        # print(logits.shape)
+        # print(outputs.keys())
+        # print(torch.max(trtokens,dim=-1).values.shape)
+        # print(torch.max(trtokens,dim=-1).indices)
+        # print(outputs.encoder_last_hidden_state.shape)
 
-        logits=torch.cat((logits,enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,16,H to 16,B,H
+        hidden=outputs.encoder_last_hidden_state[torch.arange(50),torch.max(trtokens,dim=-1).indices.flatten()].view(Es.shape[0],Es.shape[1],-1)
+        #hidden=hidden[torch.max(trtokens,dim=-1).indices]
+        #print(hidden.shape)
+        logits=torch.cat((hidden,enLogits,ImLogits),dim=1).permute(1,0,2) # convert shape B,16,H to 16,B,H
         
 
 
@@ -291,15 +302,17 @@ class LightningCLIPModule(LightningModule):
         self.log('val_loss_model', modelLoss, prog_bar=True,enable_graph=False, rank_zero_only=True)
         loss=loss+modelLoss
         self.log('val_loss', loss, prog_bar=True,enable_graph=False, rank_zero_only=True)
-        return {"loss": loss, "entokens":ENTokens.detach(), "translatedTokens":trtokens.detach()}
+        return {"loss": loss, "entokens":En.detach(), "translatedTokens":trtokens.detach()}
     
     def validation_epoch_end(self, outputs):
-        entokens=torch.cat([x["entokens"] for x in outputs],dim=0)
-        translatedTokens=torch.cat([x["translatedTokens"] for x in outputs],dim=0)
-        decoded=self.tokenizer.batch_decode(entokens,skip_special_tokens=True)
-        translated=self.tokenizer.batch_decode(translatedTokens,skip_special_tokens=True)
+        entokens=torch.cat([x["entokens"] for x in outputs],dim=0).flatten(0,1)
+        translatedTokens=torch.cat([x["translatedTokens"] for x in outputs],dim=0).flatten(0,1)
+        #print(entokens.shape)
+        #print(translatedTokens.shape)
+        decoded=[self.tokenizer.convert_tokens_to_string([ self.tokenizer._convert_id_to_token(id) for id in tokens]) for tokens in entokens.tolist()]
+        translated=[self.tokenizer.convert_tokens_to_string([ self.tokenizer._convert_id_to_token(id) for id in tokens]) for tokens in translatedTokens.tolist()]
         metric = self.getMetric("bertscore")
-        self.log("F1 BERT TranslationScore", metric.compute(predictions=decoded, references=translated)["f1"].mean().item())
+        self.log("F1 BERT TranslationScore", sum(metric.compute(predictions=translated,lang="en", references=decoded)["f1"]))
 
     
     def configure_optimizers(self):

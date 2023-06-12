@@ -51,7 +51,7 @@ def train(config={
         accelerator=config.get("accelerator","auto")
     # print("Training with config: {}".format(config))
     config["vocab_size"]=Dataset.vocab_size
-    model=LightningCLIPModule( train_batch_size=config["batch_size"],
+    model=LightningCLIPModule(tokenizer=Dataset.tokenizer, train_batch_size=config["batch_size"],
                                 **config)
     logger=[]
     if logtool:
@@ -78,7 +78,7 @@ def train(config={
             #auto_lr_find=True,
             #auto_scale_batch_size=True,
             accelerator=accelerator,
-            max_epochs=300,
+            max_epochs=100,
             #profiler="advanced",
             logger=logger,
             strategy="dp",
