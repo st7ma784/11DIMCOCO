@@ -11,6 +11,9 @@ import clip
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from functools import reduce
+
+import evaluate, time
+
 class LightningCLIPModule(LightningModule):
 
     def getMetric(self, metricName: str, attempts: int=3) -> evaluate.EvaluationModule:
@@ -21,7 +24,6 @@ class LightningCLIPModule(LightningModule):
         Returns:
             EvaluationModule: the metric.
         """
-        import evaluate, time
         for attempt in range(attempts):
 
             try:
